@@ -263,7 +263,7 @@ argsParser.add_option('-s', '--load-script', action='store', type='string', dest
 argsParser.add_option('-c', '--check-vt', action='store_true', dest='checkOnVT', default=False, help='Checks the hash of the PDF file on VirusTotal.')
 argsParser.add_option('-f', '--force-mode', action='store_true', dest='isForceMode', default=True, help='Sets force parsing mode to ignore errors.')
 argsParser.add_option('-l', '--loose-mode', action='store_true', dest='isLooseMode', default=False, help='Sets loose parsing mode to catch malformed objects.')
-argsParser.add_option('-m', '--manual-analysis', action='store_true', dest='isManualAnalysis', default=False, help='Avoids automatic Javascript analysis. Useful with eternal loops like heap spraying.')
+argsParser.add_option('-m', '--manual-analysis', action='store_true', dest='isManualAnalysis', default=True, help='Avoids automatic Javascript analysis. Useful with eternal loops like heap spraying.')
 argsParser.add_option('-u', '--update', action='store_true', dest='update', default=False, help='Updates peepdf with the latest files from the repository.')
 argsParser.add_option('-g', '--grinch-mode', action='store_true', dest='avoidColors', default=False, help='Avoids colorized output in the interactive console.')
 argsParser.add_option('-v', '--version', action='store_true', dest='version', default=False, help='Shows program\'s version number.')
@@ -277,7 +277,7 @@ try:
     alertColor = ''
     staticColor = ''
     resetColor = ''
-
+    #print options.isManualAnalysis
     fileName = args[0]
     if fileName != None:
         pdfParser = PDFParser()
@@ -290,11 +290,11 @@ try:
                                          
         from PDFConsole import PDFConsole
         console = PDFConsole(pdf, '', options.avoidColors)
+        #print statsDict
         try:
             for i in range(len(statsDict['Objects with JS code'])):
-                 #print str(statsVersion['Objects with JS code'][1][i])
                  obj= str(statsDict['Objects with JS code'][i])
-                 console.do_js_analyse(obj)
+                 console.do_js_analyse(obj, fileName)
         except Exception as e:
             print e
 

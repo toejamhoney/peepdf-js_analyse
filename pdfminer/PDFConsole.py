@@ -1599,7 +1599,7 @@ class PDFConsole(cmd.Cmd):
         print newLine + 'Shows information of the file or object ($object_id, xref, trailer)' + newLine
 
     def do_js_analyse(self, src, fname):
-        #print "PDFConsole"
+        print "PDFConsole"
         content = ''
         #validTypes = ['variable','file','object','code']
         #type = "object"
@@ -1612,9 +1612,9 @@ class PDFConsole(cmd.Cmd):
                 content = object.getJSCode()[0]
         content = content.strip()
         content = re.sub("^(<)", "//", content, flags=re.M)
-        #print self.javaScriptContexts['global']
-        jsCode, unescapedBytes, urlsFound, jsErrors, self.javaScriptContexts['global'] = analyseJS(content, self.javaScriptContexts['global'], False, fname)
-        #print "I'm here"
+        print self.javaScriptContexts['global']
+        jsCode, unescapedBytes, urlsFound, jsErrors, self.javaScriptContexts['global'] = analyseJS(content, None, False, fname)
+        print "I'm here"
         if content not in jsCode:
             jsCode = [content] + jsCode
         jsanalyseOutput = ''
@@ -1623,10 +1623,10 @@ class PDFConsole(cmd.Cmd):
                 if js == jsCode[0]:
                    continue
                 jsanalyseOutput += js
-        #if jsErrors != []:
-            #jsanalyseOutput += newLine*2
-            #for jsError in jsErrors:
-                #jsanalyseOutput += '*** Error analysing Javascript: ' + jsError + newLine
+        if jsErrors != []:
+            jsanalyseOutput += newLine*2
+            for jsError in jsErrors:
+                jsanalyseOutput += '*** Error analysing Javascript: ' + jsError + newLine
         if jsanalyseOutput != '':
             print jsanalyseOutput        
         

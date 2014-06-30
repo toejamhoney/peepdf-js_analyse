@@ -24,7 +24,7 @@
 '''
     This module contains some functions to analyse Javascript code inside the PDF file
 '''
-
+import build_objs
 import sys, re , os, jsbeautifier, traceback
 from PDFUtils import unescapeHTMLEntities, escapeString
 try:
@@ -36,8 +36,19 @@ try:
         evalCode = ''
         
         def evalOverride(self, expression):
-            self.evalCode += expression
+            #self.evalCode += '\n\n// New evaluated code\n' + expression
+	    #print expression
+            if self.evalCode.find(expression) == -1:
+	        self.evalCode += expression +'\n'
             return
+
+        def evalOverride2(self, expression):
+            #self.evalCode += '\n\n// New evaluated code\n' + expression
+	    #print expression
+            if self.evalCode.find(expression) == -1:
+		#print expression + " NOT IN " + self.evalCode
+	        self.evalCode += expression +'\n'
+            return PyV8.JSContext.current.eval(expression)
         
 except:
     JS_MODULE = False
@@ -46,10 +57,95 @@ except:
 errorsFile = 'errors.txt'
 newLine = os.linesep         
 reJSscript = '<script[^>]*?contentType\s*?=\s*?[\'"]application/x-javascript[\'"][^>]*?>(.*?)</script>'
-preDefinedCode = ['var app = this;', 'var event = {}; event.target = this;']
+preDefinedCode = 'var app = this;'
 
+def create_objs( context, fname):
+    try: 
+	app = build_objs.create_app_obj(fname)
+	context.eval("app = " + str(app) + ";")
+	context.eval("app.doc.syncAnnotScan = function () {}")
+	context.eval("app.doc.getAnnots = function () { return app.doc.annots;}")
+	context.eval("app.eval = function (string) { eval(string);}")
+        context.eval("app.newDoc = function () { return '';}")
+	event = build_objs.create_event_obj(fname)
+	context.eval("event = " + str(event) + ";")
+	info = build_objs.create_info_obj(fname)
+	context.eval("this.info = " + str(info['info']) + ";")
+        #context.eval("this.eval = function (string) { eval(string);}")
+    except Exception as e:
+        print e.message
 
-def analyseJS(code, context = None, manualAnalysis = False):
+def eval_loop (code, context, old_msg = ""):
+    #print "eval_loop"
+    try:
+        context.eval(code)
+        return context.eval("evalCode")
+    except ReferenceError as e:
+        #print e.message
+        obj = re.findall("Error:\s(.*?)\sis", e.message)
+        #do something to fix  
+        if e.message + "2" == old_msg:
+            return context.eval("evalCode")
+        elif e.message == old_msg:
+            line_num = re.findall("@\s(\d*?)\s", e.message)
+            line_num = int(line_num[0])
+            i = 0
+
+            for item in code.split("\n"):
+	        i += 1
+                if i == line_num:
+                    code = re.sub(item, "//" + item, code)
+                    break
+            return eval_loop(code, context, e.message+"2")
+        else:
+	    if (obj[0] == '$'):
+	        context.eval("$ = this;")
+	    else: 
+	        context.eval('eval=evalOverride2')
+        return eval_loop(code, context, e.message)
+    except TypeError as te:
+        #print te.message
+        if te.message.find("called on null or undefined") > -1:
+            line = re.findall("->\s(.*)", te.message)
+            if te.message == old_msg:
+               sub = re.sub("=.*", "=app", line[0])
+            else:
+                sub = re.sub("=\s?.\(.*?\)", "=app", line[0])
+            line = re.escape(line[0])
+            code = re.sub(line, sub, code)
+            #print code
+	elif te.message.find("undefined is not a function") > -1:
+	    line = re.findall("->\s(.*)", te.message)
+            if te.message == old_msg:
+                return context.eval("evalCode")
+            else:
+                sub = re.sub(".\(", "eval(", line[0])
+            line = re.escape(line[0])
+            code = re.sub(line, sub, code)
+        else:
+            if te.message == old_msg:
+	        print context.eval("e(12)[q];")
+                return context.eval("evalCode")
+            context.eval('eval=evalOverride2')
+        return eval_loop(code, context, te.message)
+    except SyntaxError as se:
+        #print se.message
+        if se.message == old_msg:
+            return context.eval("evalCode")
+        line_num = re.findall("@\s(\d*?)\s", se.message)
+        line_num = int(line_num[0])
+        i = 0
+        for item in code.split("\n"):
+	    i += 1
+            if i == line_num:
+                code = re.sub(item, "//" + item, code)
+                break
+        eval_loop(code, context, se.message)
+    except Exception as e1:
+        #print e1.message
+        return context.eval("evalCode")
+
+def analyseJS(code, context = None, manualAnalysis = False, fname =""):
     '''
         Hooks the eval function and search for obfuscated elements in the Javascript code
         
@@ -61,11 +157,12 @@ def analyseJS(code, context = None, manualAnalysis = False):
                 errors is a list of errors,
                 context is the context of execution of the Javascript code.
     '''
+    #print "In JSAnalyse"
     errors = []
     JSCode = []
     unescapedBytes = []
     urlsFound = []
-    
+
     try:
         code = unescapeHTMLEntities(code)
         scriptElements = re.findall(reJSscript, code, re.DOTALL | re.IGNORECASE)
@@ -73,6 +170,7 @@ def analyseJS(code, context = None, manualAnalysis = False):
             code = ''
             for scriptElement in scriptElements:
                 code += scriptElement + '\n\n'
+        code = re.sub("^(<)", "//", code, flags=re.M)
         #code = jsbeautifier.beautify(code)
         JSCode.append(code)
     
@@ -82,18 +180,16 @@ def analyseJS(code, context = None, manualAnalysis = False):
             context.enter()
             # Hooking the eval function
             context.eval('eval=evalOverride')
-	    try:
-                for p in preDefinedCode:
-                    context.eval(p)
- 	    except Exception as e:
-  	        print e
             #context.eval(preDefinedCode)
             while True:
+                #print "in while"
                 originalCode = code
                 try:
-                    context.eval(code)
-                    print self.evalCode
-                    evalCode = context.eval('evalCode')
+		    #code = re.sub("^(<)", "//", code, flags=re.M)
+                    #context.eval(code)
+                    create_objs(context, fname)
+		    evalCode = eval_loop(code, context)
+                    #evalCode = context.eval('evalCode')
                     #evalCode = jsbeautifier.beautify(evalCode)
                     if evalCode != '' and evalCode != code:
                         code = evalCode
@@ -106,7 +202,7 @@ def analyseJS(code, context = None, manualAnalysis = False):
                     errors.append(error)
                     break
             
-            if code != '':
+            """if code != '':
                 escapedVars = re.findall('(\w*?)\s*?=\s*?(unescape\((.*?)\))', code, re.DOTALL)
                 for var in escapedVars:
                     bytes = var[2]
@@ -133,9 +229,10 @@ def analyseJS(code, context = None, manualAnalysis = False):
                                    unescapedBytes.append(bytes)
                                 for url in urls:
                                    if url not in urlsFound:
-                                       urlsFound.append(url)
-    except:
-        traceback.print_exc(file=open(errorsFile,'a'))
+                                       urlsFound.append(url)"""
+    except Exception as e:
+        #print e.message
+        #traceback.print_exc(file=open(errorsFile,'a'))
         errors.append('Unexpected error in the JSAnalysis module!!')
     finally:
         for js in JSCode:
