@@ -1618,6 +1618,7 @@ class PDFConsole(cmd.Cmd):
         if content not in jsCode:
             jsCode = [content] + jsCode
         jsanalyseOutput = ''
+
         if jsCode != []:
             for js in jsCode:
                 if js == jsCode[0]:

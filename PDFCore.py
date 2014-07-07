@@ -43,12 +43,45 @@ isForceMode = False
 isManualAnalysis = False
 spacesChars = ['\x00','\x09','\x0a','\x0c','\x0d','\x20']
 delimiterChars = ['<<','(','<','[','{','/','%']
-monitorizedEvents = ['/OpenAction ','/AA ','/Names ','/AcroForm ']
+monitorizedEvents = ['/OpenAction ','/AA ','/Names ','/AcroForm ', '/XFA ']
 monitorizedActions = ['/JS ','/JavaScript','/Launch','/SubmitForm','/ImportData']
-monitorizedElements = ['/EmbeddedFiles ','/EmbeddedFile','/JBIG2Decode','getPageNthWord','arguments.callee','/U3D','/PRC','/RichMedia']
-jsVulns = ['mailto','Collab.collectEmailInfo','util.printf','getAnnots','getIcon','spell.customDictionaryOpen','media.newPlayer','doc.printSeps','.rawValue','app.removeToolButton']
+monitorizedElements = ['/EmbeddedFiles ',
+                       '/EmbeddedFile',
+                       '/JBIG2Decode',
+                       'getPageNthWord',
+                       'arguments.callee',
+                       '/U3D',
+                       '/PRC',
+                       '/RichMedia',
+                       '.rawValue',
+                       'keep.previous']
+jsVulns = ['mailto',
+           'Collab.collectEmailInfo',
+           'util.printf',
+           'getAnnots',
+           'getIcon',
+           'spell.customDictionaryOpen',
+           'media.newPlayer',
+           'doc.printSeps',
+           'app.removeToolButton']
 singUniqueName = 'CoolType.SING.uniqueName'
-vulnsDict = {'mailto':['CVE-2007-5020'],'Collab.collectEmailInfo':['CVE-2007-5659'],'util.printf':['CVE-2008-2992'],'/JBIG2Decode':['CVE-2009-0658'],'getIcon':['CVE-2009-0927'],'getAnnots':['CVE-2009-1492'],'spell.customDictionaryOpen':['CVE-2009-1493'],'media.newPlayer':['CVE-2009-4324'],'.rawValue':['CVE-2010-0188'],singUniqueName:['CVE-2010-2883'],'doc.printSeps':['CVE-2010-4091'],'/U3D':['CVE-2009-3953','CVE-2009-3959','CVE-2011-2462'],'/PRC':['CVE-2011-4369'],'app.removeToolButton':['CVE-2013-3346']}
+bmpVuln = 'BMP/RLE heap corruption'
+vulnsDict = {'mailto':('mailto',['CVE-2007-5020']),
+             'Collab.collectEmailInfo':('Collab.collectEmailInfo',['CVE-2007-5659']),
+             'util.printf':('util.printf',['CVE-2008-2992']),
+             '/JBIG2Decode':('Adobe JBIG2Decode Heap Corruption',['CVE-2009-0658']),
+             'getIcon':('getIcon',['CVE-2009-0927']),
+             'getAnnots':('getAnnots',['CVE-2009-1492']),
+             'spell.customDictionaryOpen':('spell.customDictionaryOpen',['CVE-2009-1493']),
+             'media.newPlayer':('media.newPlayer',['CVE-2009-4324']),
+             '.rawValue':('Adobe Acrobat Bundled LibTIFF Integer Overflow',['CVE-2010-0188']),
+             singUniqueName:(singUniqueName,['CVE-2010-2883']),
+             'doc.printSeps':('doc.printSeps',['CVE-2010-4091']),
+             '/U3D':('/U3D',['CVE-2009-3953','CVE-2009-3959','CVE-2011-2462']),
+             '/PRC':('/PRC',['CVE-2011-4369']),
+             'keep.previous':('Adobe Reader XFA oneOfChild Un-initialized memory vulnerability',['CVE-2013-0640']), # https://labs.portcullis.co.uk/blog/cve-2013-0640-adobe-reader-xfa-oneofchild-un-initialized-memory-vulnerability-part-1/
+             bmpVuln:(bmpVuln,['CVE-2013-2729']),
+             'app.removeToolButton':('app.removeToolButton',['CVE-2013-3346'])}
 jsContexts = {'global':None}
 
 class PDFObject :
@@ -109,6 +142,23 @@ class PDFObject :
             @return: A boolean
         '''
         return self.containsJScode
+
+    def encodeChars(self):
+        '''
+            Encode the content of the object if possible (only for PDFName, PDFString, PDFArray and PDFStreams) 
+            
+            @return: A tuple (status,statusContent), where statusContent is empty in case status = 0 or an error message in case status = -1
+        '''
+        return (0,'')
+    
+    def encrypt(self, password):
+        '''
+            Encrypt the content of the object if possible 
+            
+            @param password: The password used to encrypt the object. It's dependent on the object.
+            @return: A tuple (status,statusContent), where statusContent is empty in case status = 0 or an error message in case status = -1
+        '''
+        return (0,'')
 
     def getCompressedIn(self):
         '''
@@ -174,6 +224,8 @@ class PDFObject :
         '''
         stats = {}
         stats['Object'] = self.type
+        stats['MD5'] = hashlib.md5(self.value).hexdigest()
+        stats['SHA1'] = hashlib.sha1(self.value).hexdigest()
         if self.isCompressed():
             stats['Compressed in'] = str(self.compressedIn)
         else:
@@ -639,9 +691,9 @@ class PDFHexString (PDFObject) :
         self.errors = []
         self.compressedIn = None
         self.encrypted = False
-        self.value = ''
-        self.rawValue = hex
-        self.encryptedValue = hex
+        self.value = '' # Value after hex decoding and decryption
+        self.rawValue = hex # Hex characters
+        self.encryptedValue = hex # Value after hex decoding
         self.updateNeeded = False
         self.containsJScode = False
         self.JSCode = []
@@ -656,7 +708,7 @@ class PDFHexString (PDFObject) :
             else:
                 raise Exception(ret[1])        
             
-    def update(self, decrypt = False):
+    def update(self, decrypt = False, newHexValue = True):
         '''
             Updates the object after some modification has occurred
             
@@ -664,21 +716,27 @@ class PDFHexString (PDFObject) :
             @return: A tuple (status,statusContent), where statusContent is empty in case status = 0 or an error message in case status = -1
         '''
         self.errors = []
-        self.value = ''
         self.containsJScode = False
         self.JSCode = []
         self.unescapedBytes = []
         self.urlsFound = []
-        tmpValue = self.rawValue
-        if len(tmpValue) % 2 != 0:
-            tmpValue += '0'
-        try:
-            for i in range(0,len(tmpValue),2):
-                self.value += chr(int(tmpValue[i:i+2],16))
-        except:
-            errorMessage = 'Error in hexadecimal conversion'
-            self.addError(errorMessage)
-            return (-1,errorMessage)
+        if not decrypt:
+            try:
+                if newHexValue:
+                    # New hexadecimal value
+                    self.value = ''
+                    tmpValue = self.rawValue
+                    if len(tmpValue) % 2 != 0:
+                        tmpValue += '0'
+                    self.value = tmpValue.decode('hex')
+                else:
+                    # New decoded value
+                    self.rawValue = self.value.encode('hex')
+                self.encryptedValue = self.value
+            except:
+                errorMessage = 'Error in hexadecimal conversion'
+                self.addError(errorMessage)
+                return (-1,errorMessage)
         if isJavascript(self.value):
             self.containsJScode = True
             self.JSCode, self.unescapedBytes, self.urlsFound, jsErrors, jsContexts['global'] = analyseJS(self.value, jsContexts['global'], isManualAnalysis)
@@ -700,7 +758,8 @@ class PDFHexString (PDFObject) :
         if password != None:
             self.encryptionKey = password
         try:
-            self.encryptedValue = RC4(self.rawValue,self.encryptionKey)
+            self.encryptedValue = RC4(self.value,self.encryptionKey)
+            self.rawValue = self.encryptedValue.encode('hex')
         except:
             errorMessage = 'Error encrypting with RC4'
             self.addError(errorMessage)
@@ -720,11 +779,11 @@ class PDFHexString (PDFObject) :
         try:
             cleanString = unescapeString(self.encryptedValue)
             if algorithm == 'RC4':
-                self.rawValue = RC4(cleanString,self.encryptionKey)
+                self.value = RC4(cleanString,self.encryptionKey)
             elif algorithm == 'AES':
                 ret = AES.decryptData(cleanString,self.encryptionKey)
                 if ret[0] != -1:
-                    self.rawValue = ret[1]
+                    self.value = ret[1]
                 else:
                     errorMessage = 'AES decryption error: '+ret[1]
                     self.addError(errorMessage)
@@ -737,7 +796,7 @@ class PDFHexString (PDFObject) :
         return ret
 
     def getEncryptedValue(self):
-        return '<'+self.encryptedValue+'>'
+        return '<'+self.rawValue+'>'
 
     def getJSCode(self):
         '''
@@ -862,6 +921,57 @@ class PDFArray (PDFObject) :
             else:
                 raise Exception(ret[1])
 
+    def update(self, decrypt = False):
+        '''
+            Updates the object after some modification has occurred
+            
+            @param decrypt: A boolean indicating if a decryption has been performed. By default: False.
+            @return: A tuple (status,statusContent), where statusContent is empty in case status = 0 or an error message in case status = -1
+        '''
+        errorMessage = ''
+        self.errors = []
+        self.encryptedValue = '[ '
+        self.rawValue = '[ '
+        self.value = '[ '
+        self.references = []
+        self.containsJScode = False
+        self.JSCode = []
+        self.unescapedBytes = []
+        self.urlsFound = []
+        for element in self.elements:
+            if element != None:
+                type = element.getType()
+                if type == 'reference':
+                    self.references.append(element.getValue())
+                elif type == 'dictionary' or type == 'array':
+                    self.references += element.getReferences()
+                if element.containsJS():
+                    self.containsJScode = True
+                    self.JSCode += element.getJSCode()
+                    self.unescapedBytes += element.getUnescapedBytes()
+                    self.urlsFound += element.getURLs()
+                if element.isFaulty():
+                    for error in valueObject.getErrors():
+                        self.addError('Children element contains errors: ' + error)
+                if type in ['string','hexstring','array','dictionary'] and self.encrypted and not decrypt:
+                    ret = element.encrypt(self.encryptionKey)
+                    if ret[0] == -1:
+                        errorMessage = 'Error encrypting element'
+                        self.addError(errorMessage)
+                self.encryptedValue += str(element.getEncryptedValue()) + ' '
+                self.rawValue += str(element.getRawValue()) + ' '
+                self.value += element.getValue() + ' '
+            else:
+                errorMessage = 'None elements'
+                self.addError(errorMessage)
+        self.encryptedValue = self.encryptedValue[:-1] + ' ]'
+        self.rawValue = self.rawValue[:-1] + ' ]'
+        self.value = self.value[:-1] + ' ]'
+        if errorMessage != '':
+            return (-1,'Errors while updating PDFArray')
+        else:
+            return (0,'')
+        
     def addElement(self, element):
         '''
             Adds an element to the array
@@ -899,6 +1009,31 @@ class PDFArray (PDFObject) :
             return (-1,errorMessage)
         return ret
 
+    def encodeChars(self):
+        errorMessage = ''
+        encodedElements = []
+        for element in self.elements:
+            if element != None:
+                type = element.getType()
+                if type in ['string','name','array','dictionary']:
+                    ret = element.encodeChars()
+                    if ret[0] == -1:
+                        errorMessage = ret[1]
+                        self.addError(errorMessage)
+                encodedElements.append(element)
+        self.elements = encodedElements
+        ret = self.update()
+        if ret[0] == 0 and errorMessage != '':
+            return (-1,errorMessage)
+        return ret
+        
+    def encrypt(self, password = None):
+        self.encrypted = True
+        if password != None:
+            self.encryptionKey = password
+        ret = self.update()
+        return ret
+        
     def getElementByName(self, name):
         '''
             Gets the dictionary elements with the given name
@@ -1265,6 +1400,8 @@ class PDFDictionary (PDFObject):
     def getStats(self):
         stats = {}
         stats['Object'] = self.type
+        stats['MD5'] = hashlib.md5(self.value).hexdigest()
+        stats['SHA1'] = hashlib.sha1(self.value).hexdigest()
         if self.isCompressed():
             stats['Compressed in'] = str(self.compressedIn)
         else:
@@ -2220,6 +2357,12 @@ class PDFStream (PDFDictionary) :
     def getStats(self):
         stats = {}
         stats['Object'] = self.type
+        stats['MD5'] = hashlib.md5(self.value).hexdigest()
+        stats['SHA1'] = hashlib.sha1(self.value).hexdigest()
+        stats['Stream MD5'] = hashlib.md5(self.decodedStream).hexdigest()
+        stats['Stream SHA1'] = hashlib.sha1(self.decodedStream).hexdigest()
+        stats['Raw Stream MD5'] = hashlib.md5(self.rawStream).hexdigest()
+        stats['Raw Stream SHA1'] = hashlib.sha1(self.rawStream).hexdigest()
         if self.isCompressed():
             stats['Compressed in'] = str(self.compressedIn)
         else:
@@ -4136,21 +4279,29 @@ class PDFBody :
                             else:
                                 self.vulns[vuln] = [id]
         ## Extra checks
-        # CVE-2010-2883
-        # http://opensource.adobe.com/svn/opensource/tin/src/SING.cpp
-        # http://community.websense.com/blogs/securitylabs/archive/2010/09/10/brief-analysis-on-adobe-reader-sing-table-parsing-vulnerability-cve-2010-2883.aspx
         objectType = pdfObject.getType()
         if objectType == 'stream':
+            vulnFound = None
             streamContent = pdfObject.getStream()
             if len(streamContent) > 327 and streamContent[236:240] == 'SING' and streamContent[327] != '\0':
-                if self.suspiciousElements.has_key(singUniqueName):
+                # CVE-2010-2883
+                # http://opensource.adobe.com/svn/opensource/tin/src/SING.cpp
+                # http://community.websense.com/blogs/securitylabs/archive/2010/09/10/brief-analysis-on-adobe-reader-sing-table-parsing-vulnerability-cve-2010-2883.aspx
+                vulnFound = singUniqueName
+            elif streamContent.count('AAL/AAAC/wAAAv8A') > 1000:
+                # CVE-2013-2729
+                # Adobe Reader BMP/RLE heap corruption
+                # http://blog.binamuse.com/2013/05/readerbmprle.html
+                vulnFound = bmpVuln
+            if vulnFound != None:    
+                if self.suspiciousElements.has_key(vulnFound):
                     if delete:
-                        if id in self.suspiciousElements[singUniqueName]:
-                            self.suspiciousElements[singUniqueName].remove(id)
-                    elif id not in self.suspiciousElements[singUniqueName]:
-                        self.suspiciousElements[singUniqueName].append(id)
+                        if id in self.suspiciousElements[vulnFound]:
+                            self.suspiciousElements[vulnFound].remove(id)
+                    elif id not in self.suspiciousElements[vulnFound]:
+                        self.suspiciousElements[vulnFound].append(id)
                 elif not delete:
-                    self.suspiciousElements[singUniqueName] = [id]
+                    self.suspiciousElements[vulnFound] = [id]
         return (0,'')                        
     
 
@@ -4489,7 +4640,7 @@ class PDFFile :
             return (0,'')
         else:
             return (-1,'Bad PDFCrossRefSection array supplied')
-
+    
     def addError(self, errorMessage):
         if errorMessage not in self.errors:
             self.errors.append(errorMessage)
@@ -4499,19 +4650,268 @@ class PDFFile :
 
     def addNumEncodedStreams(self, num):
         self.numEncodedStreams += num
-
+                    
     def addNumObjects(self, num):
         self.numObjects += num
-
+        
     def addNumStreams(self, num):
         self.numStreams += num
-
+        
     def addTrailer(self, newTrailerArray):
         if newTrailerArray != None and isinstance(newTrailerArray,list) and len(newTrailerArray) == 2 and (newTrailerArray[0] == None or isinstance(newTrailerArray[0],PDFTrailer)) and (newTrailerArray[1] == None or isinstance(newTrailerArray[1],PDFTrailer)):
             self.trailer.append(newTrailerArray)
             return (0,'')
         else:
-            return (-1,'Bad PDFTrailer array supplied')
+            return (-1,'Bad PDFTrailer array supplied')    
+
+    def createObjectStream(self, version = None, id = None, objectIds = []):
+        errorMessage = ''
+        tmpStreamObjects = ''
+        tmpStreamObjectsInfo = ''
+        compressedStream = ''
+        compressedDict = {}
+        firstObjectOffset = ''
+        if version == None:
+            version = self.updates
+        if objectIds == []:
+            objectIds = self.body[version].getObjectsIds()
+        numObjects = len(objectIds)
+        if id == None:
+            id = self.maxObjectId + 1
+        for compressedId in objectIds:
+            object = self.body[version].getObject(compressedId)
+            if object == None:
+                errorMessage = 'Object '+str(compressedId)+' cannot be compressed: it does not exist'
+                if isForceMode:
+                    self.addError(errorMessage)
+                    numObjects -= 1
+                else:
+                    return (-1,errorMessage)
+            else:
+                objectType = object.getType()
+                if objectType == 'stream':
+                    errorMessage = 'Stream objects cannot be compressed'
+                    self.addError(errorMessage)
+                    numObjects -= 1
+                else:
+                    if objectType == 'dictionary' and object.hasElement('/U') and object.hasElement('/O') and object.hasElement('/R'):
+                        errorMessage = 'Encryption dictionaries cannot be compressed'
+                        self.addError(errorMessage)
+                        numObjects -= 1
+                    object.setCompressedIn(id)
+                    offset = len(tmpStreamObjects)
+                    tmpStreamObjectsInfo += str(compressedId)+' '+str(offset)+' '
+                    tmpStreamObjects += object.toFile()
+                    ret = self.body[version].setObject(compressedId,object,offset,modification = True)
+                    if ret[0] == -1:
+                        errorMessage = ret[1]
+                        self.addError(ret[1])
+        firstObjectOffset = str(len(tmpStreamObjectsInfo))
+        compressedStream = tmpStreamObjectsInfo + tmpStreamObjects
+        compressedDict = {'/Type':PDFName('ObjStm'),'/N':PDFNum(str(numObjects)),'/First':PDFNum(firstObjectOffset),'/Length':PDFNum(str(len(compressedStream)))}
+        try:
+            objectStream = PDFObjectStream('',compressedStream,compressedDict,{},{})
+        except Exception,e:
+            errorMessage = 'Error creating PDFObjectStream'
+            if e.message != '':
+                errorMessage += ': '+e.message
+            self.addError(errorMessage)
+            return (-1,errorMessage)
+        # Filters
+        filterObject = PDFName('FlateDecode')
+        ret = objectStream.setElement('/Filter',filterObject)
+        if ret[0] == -1:
+            errorMessage = ret[1]
+            self.addError(ret[1])
+        objectStreamOffset = self.body[version].getNextOffset()
+        if self.encrypted:
+            key = computeObjectKey(id, 0, self.encryptionKey, self.encryptionKeyLength/8)
+            ret = objectStream.encrypt(key)
+            if ret[0] == -1:
+                errorMessage = ret[1]
+                self.addError(ret[1])
+        self.body[version].setNextOffset(objectStreamOffset+len(objectStream.getRawValue()))
+        self.body[version].setObject(id,objectStream,objectStreamOffset)
+        # Xref stream
+        ret = self.createXrefStream(version)
+        if ret[0] == -1:
+            return ret
+        xrefStreamId, xrefStream = ret[1]
+        xrefStreamOffset = self.body[version].getNextOffset()
+        ret = self.body[version].setObject(xrefStreamId,xrefStream,xrefStreamOffset)
+        if ret[0] == -1:
+            errorMessage = ret[1]
+            self.addError(ret[1])
+        self.binary = True
+        self.binaryChars = '\xC0\xFF\xEE\xFA\xBA\xDA'
+        if errorMessage != '':
+            return (-1,errorMessage)
+        return (0,id)
+
+    def createXrefStream(self, version, id = None):
+        size = 0
+        elementsDict = {}
+        elementsTrailerDict = {}
+        stream = ''
+        errorMessage = ''
+        indexArray = []
+        xrefStream = None
+        xrefStreamId = None
+        bytesPerFieldArray = []
+
+        if version == None:
+            version = self.updates
+        # Trailer update
+        if len(self.trailer) > version:
+            if self.trailer[version][1] != None:
+                trailerDict = self.trailer[version][1].getTrailerDictionary()
+                if trailerDict != None:
+                    elementsTrailerDict = dict(trailerDict.getElements())
+                    elementsDict = dict(elementsTrailerDict)
+                del(trailerDict)
+            if self.trailer[version][0] != None:
+                trailerDict = self.trailer[version][0].getTrailerDictionary()
+                if trailerDict != None:
+                    trailerElementsDict = dict(trailerDict.getElements())
+                    if len(trailerElementsDict) > 0:
+                        for key in trailerElementsDict:
+                            if key not in elementsTrailerDict:
+                                elementsTrailerDict[key] = trailerElementsDict[key]
+                                elementsDict[key] = trailerElementsDict[key]
+                    del(trailerElementsDict)
+                del(trailerDict)    
+        self.createXrefStreamSection(version)
+        if len(self.crossRefTable) <= version:
+            errorMessage = 'Cross Reference Table not found'
+            self.addError(errorMessage)
+            return (-1,errorMessage)
+        section = self.crossRefTable[version][1]
+        xrefStreamId = section.getXrefStreamObject()
+        bytesPerField = section.getBytesPerField()
+        for num in bytesPerField:
+            try:
+                bytesPerFieldArray.append(PDFNum(str(num)))
+            except:
+                errorMessage = 'Error creating PDFNum in bytesPerField'
+                return (-1,errorMessage)
+        subsectionsNumber = section.getSubsectionsNumber()
+        subsections = section.getSubsectionsArray()
+        for subsection in subsections:
+            firstObject = subsection.getFirstObject()
+            numObjects = subsection.getNumObjects()
+            indexArray.append(PDFNum(str(firstObject)))
+            indexArray.append(PDFNum(str(numObjects)))
+            entries = subsection.getEntries()
+            for entry in entries:
+                ret = entry.getEntryBytes(bytesPerField)
+                if ret[0] == -1:
+                    self.addError(ret[1])
+                    return (-1,ret[1])
+                stream += ret[1]
+            if size < firstObject + numObjects:
+                size = firstObject + numObjects
+        elementsDict['/Type'] = PDFName('XRef')
+        elementsDict['/Size'] = PDFNum(str(size))
+        elementsTrailerDict['/Size'] = PDFNum(str(size))
+        elementsDict['/Index'] = PDFArray('',indexArray)
+        elementsDict['/W'] = PDFArray('',bytesPerFieldArray)        
+        elementsDict['/Length'] = PDFNum(str(len(stream)))
+        try:
+            xrefStream = PDFStream('',stream,elementsDict,{})
+        except Exception,e:
+            errorMessage = 'Error creating PDFStream'
+            if e.message != '':
+                errorMessage += ': '+e.message
+            self.addError(errorMessage)
+            return (-1,errorMessage)
+        # Filters
+        filterObject = PDFName('FlateDecode')
+        if id != None:
+            xrefStreamObject = self.getObject(id, version)
+            if xrefStreamObject != None:
+                filterObject = xrefStreamObject.getElementByName('/Filter')
+        ret = xrefStream.setElement('/Filter',filterObject)
+        if ret[0] == -1:
+            errorMessage = ret[1]
+            self.addError(ret[1])
+        try:
+            trailerStream = PDFTrailer(PDFDictionary(elements=elementsTrailerDict))
+        except Exception,e:
+            errorMessage = 'Error creating PDFTrailer'
+            if e.message != '':
+                errorMessage += ': '+e.message
+            self.addError(errorMessage)
+            return (-1,errorMessage)
+        trailerStream.setXrefStreamObject(xrefStreamId)
+        try:
+            trailerSection = PDFTrailer(PDFDictionary(elements=dict(elementsTrailerDict)))#PDFDictionary())
+        except Exception,e:
+            errorMessage = 'Error creating PDFTrailer'
+            if e.message != '':
+                errorMessage += ': '+e.message
+            self.addError(errorMessage)
+            return (-1,errorMessage)
+        self.trailer[version] = [trailerSection,trailerStream]
+        if errorMessage != '':
+            return (-1,errorMessage)
+        return (0,[xrefStreamId,xrefStream])
+    
+    def createXrefStreamSection(self, version = None):
+        lastId = 0
+        lastFreeObject = 0
+        errorMessage = ''
+        xrefStreamId = None
+        xrefEntries = [PDFCrossRefEntry(0,65535,0)]
+        if version == None:
+            version = self.updates
+        actualStream = self.crossRefTable[version][1]
+        if actualStream != None:
+             xrefStreamId = actualStream.getXrefStreamObject()
+        sortedObjectsByOffset = self.body[version].getObjectsIds()
+        sortedObjectsIds = sorted(sortedObjectsByOffset, key=lambda x: int(x))
+        indirectObjects = self.body[version].getObjects()
+        for id in sortedObjectsIds:
+            while id != lastId+1:
+                lastFreeEntry = xrefEntries[lastFreeObject]
+                lastFreeEntry.setNextObject(lastId+1)
+                xrefEntries[lastFreeObject] = lastFreeEntry
+                lastFreeObject = lastId+1
+                lastId += 1
+                xrefEntries.append(PDFCrossRefEntry(0,65535,0))
+            indirectObject = indirectObjects[id]
+            if indirectObject != None:
+                object = indirectObject.getObject()
+                if object != None:
+                    if object.isCompressed():
+                        objectStreamId = object.getCompressedIn()
+                        objectStream = self.body[version].getObject(objectStreamId)
+                        index = objectStream.getObjectIndex(id)
+                        if index == None:
+                            errorMessage = 'Compressed object not found in object stream'
+                            if isForceMode:
+                                self.addError(errorMessage)
+                            else:
+                                return (-1,errorMessage)
+                        entry = PDFCrossRefEntry(objectStreamId,index,2)
+                    else:
+                        offset = indirectObject.getOffset()
+                        entry = PDFCrossRefEntry(offset,0,1)
+                    xrefEntries.append(entry)
+                    lastId = id
+        if actualStream == None:
+            offset += len(str(object.getRawValue()))
+            xrefEntries.append(PDFCrossRefEntry(offset,0,1))
+            lastId += 1
+            xrefStreamId = lastId
+        subsection = PDFCrossRefSubSection(0,lastId+1,xrefEntries)
+        xrefSection = PDFCrossRefSection()
+        xrefSection.addSubsection(subsection)
+        xrefSection.setXrefStreamObject(xrefStreamId)
+        xrefSection.setBytesPerField([1,2,2])
+        self.crossRefTable[version] = [None,xrefSection]
+        if errorMessage != '':
+            return (-1,errorMessage)
+        return (0,lastId)
 
     def decrypt(self, password = ''):
         badPassword = False
@@ -4974,6 +5374,193 @@ class PDFFile :
             return (-1, errorMessage)
         return (0,'')
     
+    def encrypt(self, password = ''):
+        #TODO: AESV2 and V3
+        errorMessage = ''
+        encryptDictId = None
+        encryptMetadata = True
+        permissionNum = 1073741823
+        dictOE = ''
+        dictUE = ''
+        ret = self.getTrailer()
+        if ret != None:
+            trailer,trailerStream = ret[1]
+            if trailerStream != None:
+                encryptDict = trailerStream.getDictEntry('/Encrypt')
+                if encryptDict != None:
+                    encryptDictType = encryptDict.getType()
+                    if encryptDictType == 'reference':
+                        encryptDictId = encryptDict.getId()
+                fileId = self.getMD5()
+                if fileId == '':
+                    fileId = hashlib.md5(str(random.random())).hexdigest()
+                md5Object = PDFString(fileId)
+                fileIdArray = PDFArray(elements=[md5Object,md5Object])
+                trailerStream.setDictEntry('/ID',fileIdArray)
+                self.setTrailer([trailer,trailerStream])
+            else:
+                encryptDict = trailer.getDictEntry('/Encrypt')
+                if encryptDict != None:
+                    encryptDictType = encryptDict.getType()
+                    if encryptDictType == 'reference':
+                        encryptDictId = encryptDict.getId()
+                fileId = self.getMD5()
+                if fileId == '':
+                    fileId = hashlib.md5(str(random.random())).hexdigest()
+                md5Object = PDFString(fileId)
+                fileIdArray = PDFArray(elements=[md5Object,md5Object])
+                trailer.setDictEntry('/ID',fileIdArray)
+                self.setTrailer([trailer,trailerStream])
+                                
+            dictO = computeOwnerPass(password,password,128,revision = 3)
+            self.setOwnerPass(dictO)
+            ret = computeUserPass(password,dictO,fileId,permissionNum,128,revision = 3)
+            if ret[0] != -1:
+                dictU = ret[1]
+            else:
+                if isForceMode:
+                    self.addError('Decryption error: '+ret[1])
+                else:
+                    return (-1,'Decryption error: '+ret[1])
+            self.setUserPass(dictU)
+            ret = computeEncryptionKey(password, dictO, dictU, dictOE, dictUE, fileId, permissionNum, 128, revision = 3, encryptMetadata = encryptMetadata, passwordType = 'USER')
+            if ret[0] != -1:
+                encryptionKey = ret[1]
+            else:
+                encryptionKey = ''
+                if isForceMode:
+                    self.addError('Decryption error: '+ret[1])
+                else:
+                    return (-1,'Decryption error: '+ret[1])
+            self.setEncryptionKey(encryptionKey)
+            self.setEncryptionKeyLength(128)
+            encryptDict = PDFDictionary(elements = {'/V':PDFNum('2'),'/Length':PDFNum('128'),'/Filter':PDFName('Standard'),
+                                                                                        '/R':PDFNum('3'),'/P':PDFNum(str(permissionNum)),'/O':PDFString(dictO),'/U':PDFString(dictU)})
+            if encryptDictId != None:
+                ret = self.setObject(encryptDictId,encryptDict)
+                if ret[0] == -1:
+                    errorMessage = '/Encrypt dictionary has not been created/modified'
+                    self.addError(errorMessage)
+                    return (-1, errorMessage)
+            else:
+                if trailerStream != None:
+                    trailerStream.setDictEntry('/Encrypt',encryptDict)
+                else:
+                    trailer.setDictEntry('/Encrypt',encryptDict)
+                self.setTrailer([trailer,trailerStream])
+    
+            numKeyBytes = self.encryptionKeyLength/8
+            for v in range(self.updates+1):
+                indirectObjects = self.body[v].getObjects()
+                for id in indirectObjects:
+                    indirectObject = indirectObjects[id]
+                    if indirectObject != None:
+                        generationNum = indirectObject.getGenerationNumber()
+                        object = indirectObject.getObject()
+                        if object != None and not object.isCompressed():
+                            objectType = object.getType()
+                            if objectType in ['string','hexstring','array','dictionary'] or (objectType == 'stream' and (object.getElement('/Type') == None or (object.getElement('/Type').getValue() not in ['/XRef','/Metadata'] or (object.getElement('/Type').getValue() == '/Metadata' and encryptMetadata)))):
+                                key = computeObjectKey(id,generationNum,self.encryptionKey,numKeyBytes)
+                                ret = object.encrypt(key)
+                                if ret[0] == -1:
+                                    errorMessage = ret[1]
+                                    self.addError(ret[1])
+                                ret = self.body[v].setObject(id,object)
+                                if ret[0] == -1:
+                                    errorMessage = ret[1]
+                                    self.addError(ret[1])
+        else:
+            errorMessage = 'Trailer not found'
+            self.addError(errorMessage)
+        if errorMessage != '':
+            return (-1, errorMessage)
+        self.setEncrypted(True)
+        return (0,'')                
+    
+    def getBasicMetadata(self, version):
+        basicMetadata = {}
+        
+        # Getting creation information
+        infoObject = self.getInfoObject(version)
+        if infoObject != None:
+            author = infoObject.getElementByName('/Author')
+            if author != None and author != []:
+                basicMetadata['author'] = author.getValue()
+            creator = infoObject.getElementByName('/Creator')
+            if creator != None and creator != []:
+                basicMetadata['creator'] = creator.getValue()
+            producer = infoObject.getElementByName('/Producer')
+            if producer != None and producer != []:
+                basicMetadata['producer'] = producer.getValue()
+            creationDate = infoObject.getElementByName('/CreationDate')
+            if creationDate != None and creationDate != []:
+                basicMetadata['creation'] = creationDate.getValue()
+        if not basicMetadata.has_key('author'):
+            ids = self.getObjectsByString('<dc:creator>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    author = self.getMetadataElement(id, version, 'dc:creator')
+                    if author != None:
+                        basicMetadata['author'] = author
+                        break
+        if not basicMetadata.has_key('creator'):
+            ids = self.getObjectsByString('<xap:CreatorTool>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    creator = self.getMetadataElement(id, version, 'xap:CreatorTool')
+                    if creator != None:
+                        basicMetadata['creator'] = creator
+                        break
+        if not basicMetadata.has_key('creator'):
+            ids = self.getObjectsByString('<xmp:CreatorTool>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    creator = self.getMetadataElement(id, version, 'xmp:CreatorTool')
+                    if creator != None:
+                        basicMetadata['creator'] = creator
+                        break
+        if not basicMetadata.has_key('producer'):
+            ids = self.getObjectsByString('<pdf:Producer>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    producer = self.getMetadataElement(id, version, 'pdf:Producer')
+                    if producer != None:
+                        basicMetadata['producer'] = producer
+                        break
+        if not basicMetadata.has_key('creation'):
+            ids = self.getObjectsByString('<xap:CreateDate>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    creation = self.getMetadataElement(id, version, 'xap:CreateDate')
+                    if creation != None:
+                        basicMetadata['creation'] = creation
+                        break
+        if not basicMetadata.has_key('creation'):
+            ids = self.getObjectsByString('<xmp:CreateDate>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    creation = self.getMetadataElement(id, version, 'xmp:CreateDate')
+                    if creation != None:
+                        basicMetadata['creation'] = creation
+                        break
+        if not basicMetadata.has_key('modification'):
+            ids = self.getObjectsByString('<xap:ModifyDate>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    modification = self.getMetadataElement(id, version, 'xap:ModifyDate')
+                    if modification != None:
+                        basicMetadata['modification'] = modification
+                        break
+        if not basicMetadata.has_key('modification'):
+            ids = self.getObjectsByString('<xmp:ModifyDate>',version)
+            if ids != None and ids != []:
+                for id in ids:
+                    modification = self.getMetadataElement(id, version, 'xmp:ModifyDate')
+                    if modification != None:
+                        basicMetadata['modification'] = modification
+                        break
+        return basicMetadata
+    
     def getCatalogObject(self, version = None, indirect = False):
         if version == None:
             catalogObjects = []
@@ -4992,6 +5579,82 @@ class PDFFile :
                 return catalogObject
             else:
                 return None
+
+    def getCatalogObjectId(self, version = None):
+        if version == None:
+            catalogIds = []
+            for v in range(self.updates+1):
+                catalogId = None
+                trailer, streamTrailer = self.trailer[v]
+                if trailer != None:
+                    catalogId = trailer.getCatalogId()
+                if catalogId == None and streamTrailer != None:
+                    catalogId = streamTrailer.getCatalogId()
+                catalogIds.append(catalogId)
+            return catalogIds
+        else:
+            catalogId = None
+            trailer, streamTrailer = self.trailer[version]
+            if trailer != None:
+                catalogId = trailer.getCatalogId()
+            if catalogId == None and streamTrailer != None:
+                catalogId = streamTrailer.getCatalogId()
+            return catalogId
+
+    def getChangeLog (self, version = None) :
+        lastVersionObjects = []
+        actualVersionObjects = []
+        addedObjects = []
+        removedObjects = []
+        modifiedObjects = []
+        notMatchingObjects = []
+        changes = []
+        if version == None:
+            version = self.updates + 1
+        else:
+            version += 1
+        for i in range(version):
+            actualVersionObjects = self.body[i].getObjectsIds()
+            if i != 0:
+                xrefNewObjects = []
+                xrefFreeObjects = []
+                crossRefSection = self.crossRefTable[i][0]
+                crossRefStreamSection = self.crossRefTable[i][1]
+                if crossRefSection != None:
+                    xrefNewObjects += crossRefSection.getNewObjectIds()
+                    xrefFreeObjects += crossRefSection.getFreeObjectIds()
+                if crossRefStreamSection != None:
+                    xrefNewObjects += crossRefStreamSection.getNewObjectIds()
+                    xrefFreeObjects += crossRefStreamSection.getFreeObjectIds()
+                for id in actualVersionObjects:
+                    if id not in lastVersionObjects:
+                        addedObjects.append(id)
+                        lastVersionObjects.append(id)
+                    else:
+                        modifiedObjects.append(id)
+                    if id not in xrefNewObjects or id in xrefFreeObjects:
+                        notMatchingObjects.append(id)
+                for id in lastVersionObjects:
+                    if id not in actualVersionObjects:
+                        if id in xrefFreeObjects:
+                            removedObjects.append(id)
+                            lastVersionObjects.remove(id)
+                        if id in xrefNewObjects:
+                            notMatchingObjects.append(id)
+                changes.append([addedObjects,modifiedObjects,removedObjects,notMatchingObjects])
+                addedObjects = []
+                removedObjects = []
+                modifiedObjects = []
+                notMatchingObjects = []
+            else:
+                lastVersionObjects = actualVersionObjects
+        return changes
+
+    def getDetectionRate(self):
+        return self.detectionRate
+
+    def getDetectionReport(self):
+        return self.detectionReport
 
     def getEndLine(self):
         return self.endLine
@@ -5081,6 +5744,31 @@ class PDFFile :
     def getLinearized(self):
         return self.linearized
 
+    def getMD5(self):
+        return self.md5
+    
+    def getMetadata (self, version = None):
+        matchingObjects = self.getObjectsByString('/Metadata', version)
+        return matchingObjects
+    
+    def getMetadataElement(self, objectId, version, element):    
+        metadataObject = self.getObject(objectId,version)
+        if metadataObject != None:
+            if metadataObject.getType() == 'stream': 
+                stream = metadataObject.getStream()
+                matches = re.findall('<'+element+'>(.*)</'+element+'>',stream)
+                if matches != []:
+                    return matches[0]
+                else:
+                    return None
+            else:
+                return None
+        else:
+            return None
+
+    def getNumUpdates(self):
+        return self.updates
+            
     def getObject (self, id, version = None, indirect = False) :
         ''' 
             Returns the specified object
@@ -5117,6 +5805,70 @@ class PDFFile :
                 return None 
             return self.body[version].getObjectsByString(toSearch)
         
+    def getOffsets(self, version = None):
+        offsetsArray = []
+        
+        if version == None:
+            versions = range(self.updates+1)
+        else:
+            versions = [version]
+            
+        for version in versions:
+            offsets = {}
+            trailer = None
+            xref = None
+            objectStreamsOffsets = {}
+            indirectObjects = self.body[version].getObjects()
+            sortedObjectsIds = self.body[version].getObjectsIds()
+            compressedObjects = self.body[version].getCompressedObjects()
+            objectStreams = self.body[version].getObjectStreams()
+            ret = self.getXrefSection(version)
+            if ret != None:
+                xref, streamXref = ret[1]
+            ret = self.getTrailer(version)
+            if ret != None:
+                trailer, streamTrailer = ret[1]
+            if objectStreams != []:
+                for objStream in objectStreams:
+                    if objStream in indirectObjects:
+                        indirectObject = indirectObjects[objStream]
+                        if indirectObject != None:
+                            objectStreamsOffsets[objStream] = indirectObject.getOffset()
+            if version == 0:
+                offsets['header'] = (self.headerOffset,0)
+            for id in sortedObjectsIds:
+                indirectObject = indirectObjects[id]
+                if indirectObject != None:
+                    objectOffset = indirectObject.getOffset()
+                    object = indirectObject.getObject()
+                    if object != None and object.isCompressed():
+                        compressedIn = object.getCompressedIn()
+                        if compressedIn in objectStreamsOffsets:
+                            objectOffset = objectStreamsOffsets[compressedIn] + objectOffset + 20    
+                    size = indirectObject.getSize()
+                    if offsets.has_key('objects'):
+                        offsets['objects'].append((id,objectOffset,size))
+                    else:
+                        offsets['objects'] = [(id,objectOffset,size)]
+            if xref != None:
+                xrefOffset = xref.getOffset()
+                xrefSize = xref.getSize()
+                offsets['xref'] = (xrefOffset, xrefSize)
+            else:
+                offsets['xref'] = None
+            if trailer != None:
+                trailerOffset = trailer.getOffset()
+                trailerSize = trailer.getSize()
+                eofOffset = trailer.getEOFOffset()
+                offsets['trailer'] = (trailerOffset,trailerSize)
+                offsets['eof'] = (eofOffset,0)
+            else:
+                offsets['trailer'] = None
+                offsets['eof'] = None
+            offsets['compressed'] = compressedObjects
+            offsetsArray.append(offsets)
+        return offsetsArray
+
     def getOwnerPass(self):
         return self.ownerPass
     
@@ -5179,10 +5931,121 @@ class PDFFile :
                             matchedObjects.append(indirectObject.id)
         return matchedObjects
 
+    def getSHA1(self):
+        return self.sha1
+    
+    def getSHA256(self):
+        return self.sha256
     
     def getSize(self):
         return self.size
         
+    """def getStats (self):
+        stats = {}
+        stats['File'] = self.fileName
+        stats['MD5'] = self.md5
+        stats['SHA1'] = self.sha1
+        stats['SHA256'] = self.sha256
+        stats['Size'] = str(self.size)
+        stats['Detection'] = self.detectionRate
+        stats['Detection report'] = self.detectionReport
+        stats['Version'] = self.version
+        stats['Binary'] = str(self.binary)
+        stats['Linearized'] = str(self.linearized)
+        stats['Encrypted'] = str(self.encrypted)
+        stats['Encryption Algorithms'] = self.encryptionAlgorithms
+        stats['Updates'] = str(self.updates)
+        stats['Objects'] = str(self.numObjects)
+        stats['Streams'] = str(self.numStreams)
+        stats['Comments'] = str(len(self.comments))
+        stats['Errors'] = self.errors
+        stats['Versions'] = []
+        for version in range(self.updates+1):
+            statsVersion = {}
+            catalogId = None
+            infoId = None
+            trailer, streamTrailer = self.trailer[version]
+            if trailer != None:
+                catalogId = trailer.getCatalogId()
+                infoId = trailer.getInfoId()
+            if catalogId == None and streamTrailer != None:
+                catalogId = streamTrailer.getCatalogId()
+            if infoId == None and streamTrailer != None:
+                infoId = streamTrailer.getInfoId()
+            if catalogId != None:
+                statsVersion['Catalog'] = str(catalogId)
+            else:
+                statsVersion['Catalog'] = None
+            if infoId != None:
+                statsVersion['Info'] = str(infoId)
+            else:
+                statsVersion['Info'] = None
+            objectsById = sorted(self.body[version].getObjectsIds(), key=lambda x: int(x))
+            statsVersion['Objects'] = [str(self.body[version].getNumObjects()),objectsById]
+            if self.body[version].containsCompressedObjects():
+                compressedObjects = self.body[version].getCompressedObjects()
+                statsVersion['Compressed Objects'] = [str(len(compressedObjects)),compressedObjects]
+            else:
+                statsVersion['Compressed Objects'] = None
+            numFaultyObjects = self.body[version].getNumFaultyObjects()
+            if numFaultyObjects > 0:
+                statsVersion['Errors'] = [str(numFaultyObjects),self.body[version].getFaultyObjects()]
+            else:
+                statsVersion['Errors'] = None
+            numStreams = self.body[version].getNumStreams()
+            statsVersion['Streams'] = [str(numStreams),self.body[version].getStreams()]
+            if self.body[version].containsXrefStreams():
+                xrefStreams = self.body[version].getXrefStreams()
+                statsVersion['Xref Streams'] = [str(len(xrefStreams)),xrefStreams]
+            else:
+                statsVersion['Xref Streams'] = None
+            if self.body[version].containsObjectStreams():
+                objectStreams = self.body[version].getObjectStreams()
+                statsVersion['Object Streams'] = [str(len(objectStreams)),objectStreams]
+            else:
+                statsVersion['Object Streams'] = None
+            if numStreams > 0:
+                statsVersion['Encoded'] = [str(self.body[version].getNumEncodedStreams()),self.body[version].getEncodedStreams()]
+                numDecodingErrors = self.body[version].getNumDecodingErrors()
+                if numDecodingErrors > 0:
+                    statsVersion['Decoding Errors'] = [str(numDecodingErrors),self.body[version].getFaultyStreams()]
+                else:
+                    statsVersion['Decoding Errors'] = None
+            else:
+                statsVersion['Encoded'] = None
+            containingJS = self.body[version].getContainingJS()
+            if len(containingJS) > 0:
+                statsVersion['Objects with JS code'] = [str(len(containingJS)),containingJS]
+            else:
+                statsVersion['Objects with JS code'] = None
+            actions = self.body[version].getSuspiciousActions()
+            events = self.body[version].getSuspiciousEvents()
+            vulns = self.body[version].getVulns()
+            elements = self.body[version].getSuspiciousElements()
+            urls = self.body[version].getURLs()
+            if len(events) > 0:
+                statsVersion['Events'] = events
+            else:
+                statsVersion['Events'] = None
+            if len(actions) > 0:
+                statsVersion['Actions'] = actions
+            else:
+                statsVersion['Actions'] = None
+            if len(vulns) > 0:
+                statsVersion['Vulns'] = vulns
+            else:
+                statsVersion['Vulns'] = None
+            if len(elements) > 0:
+                statsVersion['Elements'] = elements
+            else:
+                statsVersion['Elements'] = None
+            if len(urls) > 0:
+                statsVersion['URLs'] = urls
+            else:
+                statsVersion['URLs'] = None
+            stats['Versions'].append(statsVersion)
+        return stats"""
+
     def getStats (self):
         stats = {}
         stats['Objects with JS code'] = []
@@ -5198,6 +6061,9 @@ class PDFFile :
                     stats['Objects with JS code'].append(id)
         return stats
 
+
+    def getSuspiciousComponents (self) :
+        pass
             
     def getTrailer (self, version = None) :
         if version == None:
@@ -5338,6 +6204,102 @@ class PDFFile :
     def isEncrypted(self):
         return self.encrypted
 
+    def makePDF(self, pdfType, content):
+        offset = 0
+        numObjects = 3
+        self.version = '1.7'
+        xrefEntries = []
+        staticIndirectObjectSize = 13+3*len(newLine)
+        self.setHeaderOffset(offset)
+        if pdfType == 'open_action_js':
+            self.binary = True
+            self.binaryChars = '\xC0\xFF\xEE\xFA\xBA\xDA'
+            offset = 16
+        else:
+            offset = 10
+            
+        # Body
+        body = PDFBody()
+        xrefEntries.append(PDFCrossRefEntry(0,65535,'f'))
+        # Catalog (1)
+        catalogElements = {'/Type':PDFName('Catalog'),'/Pages':PDFReference('2')}
+        if pdfType == 'open_action_js':
+            catalogElements['/OpenAction'] = PDFReference('4')
+        catalogDictionary = PDFDictionary(elements=catalogElements)
+        catalogSize = staticIndirectObjectSize + len(catalogDictionary.getRawValue())
+        body.setObject(object = catalogDictionary, offset = offset)
+        xrefEntries.append(PDFCrossRefEntry(offset,0,'n'))
+        offset += catalogSize
+        # Pages root node (2)
+        pagesDictionary = PDFDictionary(elements={'/Type':PDFName('Pages'),'/Kids':PDFArray(elements=[PDFReference('3')]),'/Count':PDFNum('1')})
+        pagesSize = len(pagesDictionary.getRawValue())+staticIndirectObjectSize
+        body.setObject(object = pagesDictionary, offset = offset)
+        xrefEntries.append(PDFCrossRefEntry(offset,0,'n'))
+        offset += pagesSize
+        # Page node (3)
+        mediaBoxArray = PDFArray(elements=[PDFNum('0'),PDFNum('0'),PDFNum('600'),PDFNum('800')])
+        pageDictionary = PDFDictionary(elements={'/Type':PDFName('Page'),'/Parent':PDFReference('2'),'/MediaBox':mediaBoxArray,'/Resources':PDFDictionary()})
+        pageSize = len(pageDictionary.getRawValue())+staticIndirectObjectSize
+        body.setObject(object = pageDictionary, offset = offset)
+        xrefEntries.append(PDFCrossRefEntry(offset,0,'n'))
+        offset += pageSize
+        if pdfType == 'open_action_js':
+            # Action object (4)
+            actionDictionary = PDFDictionary(elements={'/Type':PDFName('Action'),'/S':PDFName('JavaScript'),'/JS':PDFReference('5')})
+            actionSize = len(actionDictionary.getRawValue())+staticIndirectObjectSize
+            body.setObject(object = actionDictionary, offset = offset)
+            xrefEntries.append(PDFCrossRefEntry(offset,0,'n'))
+            offset += actionSize
+            # JS stream (5)
+            try:
+                jsStream = PDFStream(rawStream = content, elements = {'/Length':PDFNum(str(len(content)))})
+            except Exception,e:
+                errorMessage = 'Error creating PDFStream'
+                if e.message != '':
+                    errorMessage += ': '+e.message
+                return (-1, errorMessage)
+            ret = jsStream.setElement('/Filter',PDFName('FlateDecode'))
+            if ret[0] == -1:
+                self.addError(ret[1])
+                return ret
+            jsSize = len(jsStream.getRawValue())+staticIndirectObjectSize
+            ret = body.setObject(object = jsStream, offset = offset)
+            if ret[0] == -1:
+                self.addError(ret[1])
+                return ret
+            xrefEntries.append(PDFCrossRefEntry(offset,0,'n'))
+            offset += jsSize
+            numObjects = 5
+        body.setNextOffset(offset)
+        self.addBody(body)
+        self.addNumObjects(body.getNumObjects())
+        self.addNumStreams(body.getNumStreams())
+        self.addNumEncodedStreams(body.getNumEncodedStreams())
+        self.addNumDecodingErrors(body.getNumDecodingErrors())
+        
+        # xref table
+        subsection = PDFCrossRefSubSection(0,numObjects+1,xrefEntries)
+        xrefSection = PDFCrossRefSection()
+        xrefSection.addSubsection(subsection)
+        xrefSection.setOffset(offset)
+        xrefOffset = offset
+        xrefSectionSize = len(xrefEntries)*20+10
+        xrefSection.setSize(xrefSectionSize)
+        offset += xrefSectionSize
+        self.addCrossRefTableSection([xrefSection,None])
+        
+        # Trailer
+        trailerDictionary = PDFDictionary(elements={'/Size':PDFNum(str(numObjects+1)),'/Root':PDFReference('1')})
+        trailerSize = len(trailerDictionary.getRawValue())+25
+        trailer = PDFTrailer(trailerDictionary,str(xrefOffset))
+        trailer.setOffset(offset)
+        trailer.setSize(trailerSize)
+        trailer.setEOFOffset(offset+trailerSize)
+        self.addTrailer([trailer,None])
+        self.setSize(offset+trailerSize+5)
+        self.updateStats()
+        return (0,'')
+
     def replace(self, string1, string2):
         errorMessage = ''
         stringFound = False
@@ -5376,7 +6338,143 @@ class PDFFile :
                 if error[:lenErrorType] == errorType:
                     self.errors.remove(error)
                 
+    def save(self, filename, version = None, malformedOptions = [], headerFile = None):
+        maxId = 0
+        offset = 0
+        lastXrefSectionOffset = 0
+        prevXrefSectionOffset = 0
+        prevXrefStreamOffset = 0
+        indirectObjects = {}
+        xrefStreamObjectId = None
+        xrefStreamObject = None
+        try:
+            if version == None:
+                version = self.updates
+            outputFileContent = self.headerToFile(malformedOptions,headerFile)
+            offset = len(outputFileContent)
+            for v in range(version+1):
+                xrefStreamObjectId = None
+                xrefStreamObject = None
+                sortedObjectsIds = self.body[v].getObjectsIds()
+                indirectObjects = self.body[v].getObjects()
+                section, streamSection = self.crossRefTable[v]
+                trailer, streamTrailer = self.trailer[v]
+                if section != None:
+                    numSubSectionsInXref = section.getSubsectionsNumber()
+                else:
+                    numSubSectionsInXref = 0
+                if streamSection != None:
+                    numSubSectionsInXrefStream = streamSection.getSubsectionsNumber()
+                else:
+                    numSubSectionsInXrefStream = 0
+                if streamSection != None:
+                    xrefStreamObjectId = streamSection.getXrefStreamObject()
+                    if indirectObjects.has_key(xrefStreamObjectId):
+                        xrefStreamObject = indirectObjects[xrefStreamObjectId]
+                        sortedObjectsIds.remove(xrefStreamObjectId)
+                for id in sortedObjectsIds:
+                    if id > maxId:
+                        maxId = id
+                    indirectObject = indirectObjects[id]
+                    if indirectObject != None:
+                        object = indirectObject.getObject()
+                        if object != None:
+                            objectType = object.getType()
+                            if not object.isCompressed():
+                                indirectObject.setOffset(offset)
+                                if numSubSectionsInXref != 0:
+                                    ret = section.updateOffset(id, offset)
+                                    if ret[0] == -1:
+                                        ret = section.addEntry(id,PDFCrossRefEntry(offset,0,'n'))
+                                        if ret[0] == -1:
+                                            self.addError(ret[1])
+                                if numSubSectionsInXrefStream != 0:
+                                    ret = streamSection.updateOffset(id, offset)
+                                    if ret[0] == -1:
+                                        ret = streamSection.addEntry(id,PDFCrossRefEntry(offset,0,'n'))
+                                        if ret[0] == -1:
+                                            self.addError(ret[1])
+                                objectFileOutput = indirectObject.toFile()
+                                if objectType == 'stream' and MAL_ESTREAM in malformedOptions:
+                                    objectFileOutput = objectFileOutput.replace(newLine+'endstream','')
+                                elif MAL_ALL in malformedOptions or MAL_EOBJ in malformedOptions:
+                                    objectFileOutput = objectFileOutput.replace(newLine+'endobj','')
+                                outputFileContent += objectFileOutput
+                                offset = len(outputFileContent)
+                                indirectObject.setSize(offset-indirectObject.getOffset())
+                                indirectObjects[id] = indirectObject
+                    
+                if xrefStreamObject != None:
+                    if numSubSectionsInXref != 0:
+                        ret = section.updateOffset(xrefStreamObjectId, offset)
+                        if ret[0] == -1:
+                            self.addError(ret[1])
+                    ret = streamSection.updateOffset(xrefStreamObjectId, offset)
+                    if ret[0] == -1:
+                        self.addError(ret[1])
+                    xrefStreamObject.setOffset(offset)
+                    if xrefStreamObjectId > maxId:
+                        maxId = xrefStreamObjectId
+                    streamSection.setSize(maxId+1)
+                    if streamTrailer != None:
+                        streamTrailer.setNumObjects(maxId+1)
+                        if prevXrefStreamOffset != 0:
+                            streamTrailer.setPrevCrossRefSection(prevXrefStreamOffset)
+                        self.trailer[v][1] = streamTrailer
+                    self.crossRefTable[v][1] = streamSection
+                    ret = self.createXrefStream(v, xrefStreamObjectId)
+                    if ret[0] == -1:
+                        return (-1,ret[1])
+                    xrefStreamObjectId,newXrefStream = ret[1]
+                    xrefStreamObject.setObject(newXrefStream)
+                    objectFileOutput = xrefStreamObject.toFile()
+                    if MAL_ALL in malformedOptions or MAL_ESTREAM in malformedOptions:
+                        objectFileOutput = objectFileOutput.replace(newLine+'endstream','')
+                    outputFileContent += objectFileOutput
+                    prevXrefStreamOffset = offset
+                    lastXrefSectionOffset = offset
+                    offset = len(outputFileContent)
+                    xrefStreamObject.setSize(offset-xrefStreamObject.getOffset())
+                    indirectObjects[xrefStreamObjectId] = xrefStreamObject
+                self.body[v].setNextOffset(offset)    
+                                        
+                if section != None and MAL_ALL not in malformedOptions and MAL_XREF not in malformedOptions:
+                    section.setOffset(offset)
+                    lastXrefSectionOffset = offset
+                    outputFileContent += section.toFile()
+                    offset = len(outputFileContent)
+                    section.setSize(offset-section.getOffset())
+                    self.crossRefTable[v][0] = section
+                    
+                if trailer != None:
+                    trailer.setLastCrossRefSection(lastXrefSectionOffset)
+                    trailer.setOffset(offset)
+                    if trailer.getCatalogId() != None and trailer.getSize() != 0:
+                        trailer.setNumObjects(maxId+1)
+                        if prevXrefSectionOffset != 0:
+                            trailer.setPrevCrossRefSection(prevXrefSectionOffset)
+                    outputFileContent += trailer.toFile()
+                    offset = len(outputFileContent)
+                    trailer.setSize(offset-trailer.getOffset())
+                    self.trailer[v][0] = trailer
+                prevXrefSectionOffset = lastXrefSectionOffset
+                self.body[v].setObjects(indirectObjects)
+                offset = len(outputFileContent)
+            open(filename,'wb').write(outputFileContent)
+            self.setMD5(hashlib.md5(outputFileContent).hexdigest())
+            self.setSize(len(outputFileContent))
+            self.path = os.path.realpath(filename)
+            self.fileName = filename
+        except:
+            return (-1,'Unspecified error')
+        return (0,'')
 
+    def setDetectionRate(self, newRate):
+        self.detectionRate = newRate
+
+    def setDetectionReport(self, detectionReportLink):
+        self.detectionReport = detectionReportLink
+        
     def setEncryptDict(self, dict):
         self.encryptDict = dict
 
@@ -5414,6 +6512,9 @@ class PDFFile :
         if int(id) > self.maxObjectId:
             self.maxObjectId = int(id)
         
+    def setMD5(self, md5):
+        self.md5 = md5
+                
     def setObject (self, id, object, version = None, mod = False):
         errorMessage = ''
         if object == None:
@@ -5448,6 +6549,12 @@ class PDFFile :
         
     def setPath(self, path):
         self.path = path
+
+    def setSHA1(self, sha1):
+        self.sha1 = sha1
+
+    def setSHA256(self, sha256):
+        self.sha256 = sha256
 
     def setSize(self, size):
         self.size = size
@@ -5506,6 +6613,17 @@ class PDFFile :
                     self.setEncrypted(True)
         return (0,'')
 
+    def updateBody (self, version) :
+        #TODO
+        pass
+    
+    def updateCrossRefTable (self, version) :
+        #TODO
+        pass
+    
+    def updateTrailer (self, version) :
+        #TODO
+        pass
 
 
 class PDFParser :
@@ -5538,9 +6656,75 @@ class PDFParser :
         isForceMode = forceMode
         isManualAnalysis = manualAnalysis
         
+        # Reading the file header
+        file = open(fileName,'rb')
+        for line in file:
+            if versionLine == '':
+                pdfHeaderIndex = line.find('%PDF-')
+                psHeaderIndex = line.find('%!PS-Adobe-')
+                if pdfHeaderIndex != -1 or psHeaderIndex != -1:
+                    index = line.find('\r')
+                    if index != -1 and index+1 < len(line) and line[index+1] != '\n':
+                        index += 1
+                        versionLine = line[:index]
+                        binaryLine = line[index:]
+                        break
+                    else:
+                        versionLine = line
+                    if pdfHeaderIndex != -1:
+                        headerOffset += pdfHeaderIndex
+                    else:
+                        headerOffset += psHeaderIndex
+                    pdfFile.setHeaderOffset(headerOffset)
+                else:
+                    garbageHeader += line
+            else:
+                binaryLine = line
+                break
+            headerOffset += len(line)
+        file.close()
+        
+        # Getting the specification version
+        versionLine = versionLine.replace('\r','')
+        versionLine = versionLine.replace('\n','')
+        matchVersion = re.findall('%(PDF-|!PS-Adobe-\d{1,2}\.\d{1,2}\sPDF-)(\d{1,2}\.\d{1,2})',versionLine)
+        if matchVersion == []:
+            if forceMode:
+                pdfFile.setVersion(versionLine)
+                pdfFile.addError('Bad PDF header')
+                errorMessage = 'Bad PDF header'
+            else:
+                sys.exit('Error: Bad PDF header!! (' + versionLine + ')')
+        else:
+            pdfFile.setVersion(matchVersion[0][1])
+        if garbageHeader != '':
+            pdfFile.setGarbageHeader(garbageHeader)
+            
+        # Getting the end of line
+        if len(binaryLine) > 3:
+            if binaryLine[-2:] == '\r\n':
+                pdfFile.setEndLine('\r\n')
+            else:
+                if binaryLine[-1] == '\r':
+                    pdfFile.setEndLine('\r')
+                elif binaryLine[-1] == '\n':
+                    pdfFile.setEndLine('\n')
+                else:
+                    pdfFile.setEndLine('\n')
+        
+            # Does it contain binary characters??
+            if binaryLine[0] == '%' and ord(binaryLine[1]) >= 128 and ord(binaryLine[2]) >= 128 and ord(binaryLine[3]) >= 128 and ord(binaryLine[4]) >= 128:
+                pdfFile.binary = True
+                pdfFile.binaryChars = binaryLine[1:5]
+            else:
+                pdfFile.binary = False
+            
         # Reading the rest of the file
         fileContent = open(fileName,'rb').read()
         pdfFile.setSize(len(fileContent))
+        pdfFile.setMD5(hashlib.md5(fileContent).hexdigest())
+        pdfFile.setSHA1(hashlib.sha1(fileContent).hexdigest())
+        pdfFile.setSHA256(hashlib.sha256(fileContent).hexdigest())
         
         # Getting the number of updates in the file
         while fileContent.find('%%EOF') != -1:
@@ -5678,10 +6862,10 @@ class PDFParser :
             if ret[0] == -1:
                 pdfFile.addError(ret[1])
             pdfFile.addBody(body)
-            #pdfFile.addNumObjects(body.getNumObjects())
-            #pdfFile.addNumStreams(body.getNumStreams())
-            #pdfFile.addNumEncodedStreams(body.getNumEncodedStreams())
-            #pdfFile.addNumDecodingErrors(body.getNumDecodingErrors())
+            pdfFile.addNumObjects(body.getNumObjects())
+            pdfFile.addNumStreams(body.getNumStreams())
+            pdfFile.addNumEncodedStreams(body.getNumEncodedStreams())
+            pdfFile.addNumDecodingErrors(body.getNumDecodingErrors())
             isFirstBody = False
             
             # Converting the cross reference table content in PDFObjects
@@ -6431,12 +7615,15 @@ class PDFParser :
                         dictContent = ''
                     else:
                         dictContent = ret[1]
-                    if content.find('stream') != -1 and dictContent.find('stream') == -1:
+                    nonDictContent = content[self.charCounter:]
+                    streamFound = re.findall('[>\s]stream', nonDictContent)
+                    if streamFound:
                         ret = self.readUntilSymbol(content, 'stream')
                         if ret[0] == -1:
                             return ret
                         auxDict = ret[1]
                         self.readSymbol(content, 'stream', False)
+                        self.readUntilEndOfLine(content)
                         self.readSymbol(content, '\r', False)
                         self.readSymbol(content, '\n', False)
                         ret = self.readUntilSymbol(content, 'endstream')

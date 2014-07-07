@@ -252,7 +252,8 @@ def main(fname):
         res += proc(fname, objids, pagenos, password=password,
              dumpall=dumpall, codec=codec, extractdir=extractdir)
     except Exception as e:
-        print e
+        #print e
+        pass
     #print "about to return"
     return res
     

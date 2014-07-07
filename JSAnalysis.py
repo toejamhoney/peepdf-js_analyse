@@ -24,8 +24,8 @@
 '''
     This module contains some functions to analyse Javascript code inside the PDF file
 '''
-import build_objs
-import sys, re , os, jsbeautifier, traceback
+import build_objs, lxml
+import sys, re , os, jsbeautifier, inspect
 from PDFUtils import unescapeHTMLEntities, escapeString
 try:
     import PyV8
@@ -37,17 +37,17 @@ try:
         
         def evalOverride(self, expression):
             #self.evalCode += '\n\n// New evaluated code\n' + expression
-	    #print expression
+            #print expression
             if self.evalCode.find(expression) == -1:
-	        self.evalCode += expression +'\n'
+                self.evalCode += expression +'\n'
             return
 
         def evalOverride2(self, expression):
             #self.evalCode += '\n\n// New evaluated code\n' + expression
-	    #print expression
+            #print expression
             if self.evalCode.find(expression) == -1:
-		#print expression + " NOT IN " + self.evalCode
-	        self.evalCode += expression +'\n'
+                #print expression + " NOT IN " + self.evalCode
+                self.evalCode += expression +'\n'
             return PyV8.JSContext.current.eval(expression)
         
 except:
@@ -59,21 +59,44 @@ newLine = os.linesep
 reJSscript = '<script[^>]*?contentType\s*?=\s*?[\'"]application/x-javascript[\'"][^>]*?>(.*?)</script>'
 preDefinedCode = 'var app = this;'
 
-def create_objs( context, fname):
-    try: 
-	app = build_objs.create_app_obj(fname)
-	context.eval("app = " + str(app) + ";")
-	context.eval("app.doc.syncAnnotScan = function () {}")
-	context.eval("app.doc.getAnnots = function () { return app.doc.annots;}")
-	context.eval("app.eval = function (string) { eval(string);}")
-        context.eval("app.newDoc = function () { return '';}")
-	event = build_objs.create_event_obj(fname)
-	context.eval("event = " + str(event) + ";")
-	info = build_objs.create_info_obj(fname)
-	context.eval("this.info = " + str(info['info']) + ";")
-        #context.eval("this.eval = function (string) { eval(string);}")
+def create_objs(context, fname):
+    try:
+        tree = build_objs.create_tree(fname)
+        #fields = build_objs.get_fields(tree)
+        #print fields
+        #for field in fields:
+        #    context.eval(field + " = " + fields[field])
     except Exception as e:
-        print e.message
+        #print e.message
+        pass
+    if tree:
+        try: 
+            app = build_objs.create_app_obj(tree)
+            context.eval("app = " + str(app) + ";")
+            context.eval("app.doc.syncAnnotScan = function () {}")
+            context.eval("app.doc.getAnnots = function () { return app.doc.annots;}")
+            context.eval("app.eval = function (string) { eval(string);}")
+            context.eval("app.newDoc = function () { return '';}")
+            context.eval("app.getString = function () { ret = \"\"; for(var prop in app){ ret += app[prop]; } return ret;}")
+            #print app
+        except Exception as e:
+            #print e.message
+            pass
+        try:
+            event = build_objs.create_event_obj(tree)
+            context.eval("event = " + str(event) + ";")
+        except Exception as e:
+            print e.message
+            pass
+        try:
+            info = build_objs.create_info_obj(tree)
+            context.eval("this.info = " + str(info['info']) + ";")
+            context.eval("event.target.info = this.info")
+            context.eval("this.eval = eval")
+            #print info
+        except Exception as e:
+            print e.message
+            pass
 
 def eval_loop (code, context, old_msg = ""):
     #print "eval_loop"
@@ -92,19 +115,19 @@ def eval_loop (code, context, old_msg = ""):
             i = 0
 
             for item in code.split("\n"):
-	        i += 1
+                i += 1
                 if i == line_num:
                     code = re.sub(item, "//" + item, code)
                     break
             return eval_loop(code, context, e.message+"2")
         else:
-	    if (obj[0] == '$'):
-	        context.eval("$ = this;")
-	    else: 
-	        context.eval('eval=evalOverride2')
+            if (obj[0] == '$'):
+                context.eval("$ = this;")
+            else: 
+                context.eval('eval=evalOverride2')
         return eval_loop(code, context, e.message)
     except TypeError as te:
-        #print te.message
+        print te.message
         if te.message.find("called on null or undefined") > -1:
             line = re.findall("->\s(.*)", te.message)
             if te.message == old_msg:
@@ -113,36 +136,47 @@ def eval_loop (code, context, old_msg = ""):
                 sub = re.sub("=\s?.\(.*?\)", "=app", line[0])
             line = re.escape(line[0])
             code = re.sub(line, sub, code)
-            #print code
-	elif te.message.find("undefined is not a function") > -1:
-	    line = re.findall("->\s(.*)", te.message)
+        elif te.message.find("undefined is not a function") > -1:
+            line = re.findall("->\s(.*)", te.message)
             if te.message == old_msg:
                 return context.eval("evalCode")
             else:
-                sub = re.sub(".\(", "eval(", line[0])
+                match = re.findall("[\s=]?(.*?)\(", line[0])
+                sub = re.sub(match[0], "eval", line[0])
+            line = re.escape(line[0])
+            code = re.sub(line, sub, code)
+        elif te.message.find("Cannot read property") > -1:
+            line = re.findall("->\s(.*)", te.message)
+            if te.message == old_msg:
+                return context.eval("evalCode")
+            else:
+                match = re.findall("[=\s](.*?)\[", line[0])
+                if len(match) > 0:
+                    sub = re.sub(match[0], "app", line[0])
+                else:
+                    return context.eval("evalCode")
             line = re.escape(line[0])
             code = re.sub(line, sub, code)
         else:
             if te.message == old_msg:
-	        print context.eval("e(12)[q];")
                 return context.eval("evalCode")
             context.eval('eval=evalOverride2')
         return eval_loop(code, context, te.message)
     except SyntaxError as se:
-        #print se.message
+        print se.message
         if se.message == old_msg:
             return context.eval("evalCode")
         line_num = re.findall("@\s(\d*?)\s", se.message)
         line_num = int(line_num[0])
         i = 0
         for item in code.split("\n"):
-	    i += 1
+            i += 1
             if i == line_num:
                 code = re.sub(item, "//" + item, code)
                 break
         eval_loop(code, context, se.message)
     except Exception as e1:
-        #print e1.message
+        print e1.message
         return context.eval("evalCode")
 
 def analyseJS(code, context = None, manualAnalysis = False, fname =""):
@@ -185,17 +219,18 @@ def analyseJS(code, context = None, manualAnalysis = False, fname =""):
                 #print "in while"
                 originalCode = code
                 try:
-		    #code = re.sub("^(<)", "//", code, flags=re.M)
-                    #context.eval(code)
+                    #print code
                     create_objs(context, fname)
-		    evalCode = eval_loop(code, context)
+                    evalCode = eval_loop(code, context)
                     #evalCode = context.eval('evalCode')
                     #evalCode = jsbeautifier.beautify(evalCode)
-                    if evalCode != '' and evalCode != code:
+                    JSCode.append(evalCode)
+                    break
+                    """if evalCode != '' and evalCode != code:
                         code = evalCode
                         JSCode.append(code)
                     else:
-                        break
+                        break"""
                 except:
                     error = str(sys.exc_info()[1])
                     open('jserror.log','ab').write(error + newLine)
